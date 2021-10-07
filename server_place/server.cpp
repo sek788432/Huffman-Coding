@@ -184,7 +184,8 @@ unsigned char* getDecodedBuffer(string bitstring, vector<unsigned char>&buffer, 
 	return buffer.data();
 }
 
-string getStringFromBuffer(unsigned char* buffer, int sz){
+string getStringFromBuffer(unsigned char* buffer, int sz)
+{
 	string bitstring = "";
 	for(int i=0; i<sz; i++){
 		bitstring+=toBinary(buffer[i]);

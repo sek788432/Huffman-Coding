@@ -267,7 +267,8 @@ void Huffman()
     get_bit_string(root,buffer,size,sum);
 }
 
-int main(){
+int main()
+{
     Huffman();
     connect();
     double origin = get_file_size(input);
