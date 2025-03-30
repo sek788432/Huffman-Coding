@@ -1,284 +1,371 @@
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/types.h>
-#include <iostream>
-#include <fstream>
-#include <cstring>
-#include <map>
-#include <set>
-#include <algorithm>
-#include <functional>
-#include <queue>
-#include <vector>
-#define compressed "compressed.jpeg"
-#define code_file "code.txt"
-#define for_decompressed "for_decompressed.txt"
-#define buffer_size 10240
-#define input "dog.jpeg"
-#define IP "127.0.0.1"
-#define port 5200
-using namespace std;
-int clientSocket;
-string write_to_file="";
-map<unsigned char,string> code;
+#include "../utils.h"
 
-struct TreeNode
-{
+// Huffman Tree Node
+struct TreeNode {
     int frequency;
     unsigned char key;
-    TreeNode *left;
-    TreeNode *right;
-    TreeNode(unsigned char x ,int y) : key(x), frequency(y),left(NULL), right(NULL) {}
+    TreeNode* left;
+    TreeNode* right;
+    TreeNode(unsigned char x, int y)
+        : frequency(y), key(x), left(nullptr), right(nullptr) {}
 };
 
-struct comp  //for sorting map by value
-{
-    bool operator()(TreeNode* a,TreeNode* b){
-        if (a->frequency != b->frequency)
-        return a->frequency > b->frequency;
+// Comparator for priority queue
+struct Comp {
+    bool operator()(TreeNode* a, TreeNode* b) {
+        if (a->frequency != b->frequency) return a->frequency > b->frequency;
         return a->key > b->key;
     }
 };
 
-unsigned char *readFileIntoBuffer(const char* path, int &sz)
-{
-    FILE *fp = fopen(path, "rb");
-    sz = 0;
-    fseek(fp, 0, SEEK_END);
-    sz = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    unsigned char *buffer = (unsigned char *)malloc(sz);
-    fread(buffer, 1, sz, fp);
-    return buffer;
-}
+// Huffman Compressor class
+class HuffmanCompressor {
+   private:
+    std::map<unsigned char, std::string> codeMap;
+    std::string writeToFile;
 
-void connect()
-{
-    clientSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if(clientSocket<0){
-        cout<<"Connection Error"<<endl;
-        exit(1);
+    static std::string toBinary(unsigned char a) {
+        std::string output;
+        output.reserve(8);
+        for (int i = 7; i >= 0; --i) {
+            output += (a & (1 << i)) ? "1" : "0";
+        }
+        return output;
     }
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    serverAddr.sin_addr.s_addr = inet_addr(IP);
-    int con = connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
-    if(con<0){
-        cout<<"Connection Error"<<endl;
-        exit(1);
-    }
-}
 
-double get_file_size(const char* path)
-{
-    FILE * fpIn = fopen(path, "rb");
-    long long  int file_size = 0;
-    char buf[buffer_size];
-    while(1){
-        ssize_t bytesRead = fread(buf, 1, sizeof(buf), fpIn);
-        if (bytesRead <= 0) break;  // EOF
-        file_size+=(int)bytesRead;
+    void treeTraversal(TreeNode* root, std::string current,
+                       long long int& sum) {
+        if (root->left) treeTraversal(root->left, current + "0", sum);
+        if (!root->left && !root->right) {  // leaf node
+            std::string tmp(1, root->key);
+            writeToFile += tmp + " -> " + std::to_string(root->frequency) +
+                           "(" +
+                           std::to_string((float)root->frequency * 100 / sum) +
+                           "%)" + " -> " + current + "\n";
+            codeMap[root->key] = current;
+        }
+        if (root->right) treeTraversal(root->right, current + "1", sum);
     }
-    double size = file_size;
-    fclose(fpIn);
-    return size;
-}
 
-void pass_file(const char* path)
-{
-    FILE * fpIn = fopen(path, "rb");
-    long long  int file_size = 0;
-    if (fpIn){
-        char buf[buffer_size];
-        while(1){
-            ssize_t bytesRead = fread(buf, 1, sizeof(buf), fpIn);
-            if (bytesRead <= 0) break;  // EOF
-            file_size+=(int)bytesRead;
-            if (send(clientSocket, buf, bytesRead, 0) != bytesRead){
-                perror("send");
-                break;
+    std::vector<unsigned char> getBufferFromString(const std::string& bitstring,
+                                                   int& sz) {
+        std::vector<unsigned char> outputBuffer;
+        int interval = 0;
+        unsigned char bit = 0;
+
+        for (int i = 0; i < sz; i++) {
+            bit = (bit << 1) | (bitstring[i] - '0');
+            interval++;
+            if (interval == 8) {
+                interval = 0;
+                outputBuffer.push_back(bit);
+                bit = 0;
             }
         }
-        double size = file_size;
-        //cout<<"Send "<<path<<" to "<<IP<<":"<<port<<",file size is "<<size<<" bytes"<<endl;
-    }
-    fclose(fpIn);
-    close(clientSocket);
-}
 
-void TreeTraversal(TreeNode* root,string current,long long int &sum)
-{
-    if(root->left!=NULL)
-    TreeTraversal(root->left,current+"0",sum);
-    if(root->left==NULL && root->right==NULL){   //traverse to leaf
-        string tmp(1,root->key);
-        write_to_file += tmp+" -> "+to_string(root->frequency)+"("+to_string((float)root->frequency*100/sum)+"%)"+" -> "+current+"\n";
-        code[root->key] = current;
+        sz = outputBuffer.size();
+        return outputBuffer;
     }
-    if(root->right!=NULL)
-    TreeTraversal(root->right,current+"1",sum);
-}
 
-string toBinary(unsigned  char a)
-{
-    string output  = "";
-    while(a!=0){
-        string bit = a%2==0?"0":"1";
-        output+=bit;
-        a/=2;
+    void writeFileFromBuffer(const std::string& path,
+                             const std::vector<unsigned char>& buffer,
+                             bool append = false) {
+        std::ofstream file(path, std::ios::binary | (append ? std::ios::app
+                                                            : std::ios::trunc));
+        if (!file) {
+            throw std::runtime_error("Failed to open file for writing: " +
+                                     path);
+        }
+        file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
     }
-    if(output.size()<8){
-        int deficit = 8 - output.size();
-        for(int i=0; i<deficit; i++){
-            output+="0";
+
+    void writeHeader(const std::string& path, int paddedBits) {
+        int size = codeMap.size();
+        writeFileFromBuffer(
+            path,
+            std::vector<unsigned char>(
+                reinterpret_cast<unsigned char*>(&paddedBits),
+                reinterpret_cast<unsigned char*>(&paddedBits) + sizeof(int)));
+        writeFileFromBuffer(
+            path,
+            std::vector<unsigned char>(
+                reinterpret_cast<unsigned char*>(&size),
+                reinterpret_cast<unsigned char*>(&size) + sizeof(int)),
+            true);
+
+        for (const auto& [key, value] : codeMap) {
+            writeFileFromBuffer(path, std::vector<unsigned char>{key}, true);
+            int len = value.size();
+            writeFileFromBuffer(
+                path,
+                std::vector<unsigned char>(
+                    reinterpret_cast<unsigned char*>(&len),
+                    reinterpret_cast<unsigned char*>(&len) + sizeof(int)),
+                true);
+            writeFileFromBuffer(
+                path, std::vector<unsigned char>(value.begin(), value.end()),
+                true);
         }
     }
-    reverse(output.begin(), output.end());
-    return output;
-}
 
-unsigned char* getBufferFromString(string bitstring, vector<unsigned char>&outputBuffer, int& sz)
-{
-    int interval = 0;
-    unsigned char bit = 0;
-    for(int i=0; i<sz; i++){
-        bit = (bit<<1)|(bitstring[i]-'0');
-        interval++;
-        if(interval==8){
-            interval = 0;
-            outputBuffer.push_back(bit);
-            bit = 0;
+    void writeCodeToFile() {
+        std::string codeContent;
+        for (const auto& [key, value] : codeMap) {
+            codeContent += std::string(1, key) + ":" + value + "\n";
+        }
+
+        std::ofstream out1(FOR_DECOMPRESSED_FILE.data());
+        std::ofstream out(CODE_FILE.data());
+
+        if (!out1 || !out) {
+            throw std::runtime_error("Failed to open code files for writing");
+        }
+
+        out << writeToFile;
+        out1 << codeContent;
+    }
+
+    void compress(const std::string& outputString, int paddedBits) {
+        int size = outputString.size();
+        std::vector<unsigned char> outputBuffer =
+            getBufferFromString(outputString, size);
+        writeHeader(COMPRESSED_FILE.data(), paddedBits);
+        writeFileFromBuffer(COMPRESSED_FILE.data(), outputBuffer, true);
+    }
+
+    void getBitString(TreeNode* root, const std::vector<unsigned char>& buffer,
+                      int size, long long int& sum) {
+        std::string ini;
+        treeTraversal(root, ini, sum);
+        writeCodeToFile();
+
+        std::string outString;
+        outString.reserve(size * 8);
+        for (int i = 0; i < size; i++) {
+            outString += codeMap[buffer[i]];
+        }
+
+        int paddedBits = 0;
+        if (outString.size() % 8 != 0) {
+            int deficit = 8 * ((outString.size() / 8) + 1) - outString.size();
+            paddedBits = deficit;
+            outString.append(deficit, '0');
+        }
+
+        compress(outString, paddedBits);
+    }
+
+    TreeNode* createTree(const std::map<unsigned char, int>& frequencyMap) {
+        std::priority_queue<TreeNode*, std::vector<TreeNode*>, Comp> pq;
+
+        for (const auto& [key, freq] : frequencyMap) {
+            pq.push(new TreeNode(key, freq));
+        }
+
+        while (pq.size() > 1) {
+            TreeNode* left = pq.top();
+            pq.pop();
+            TreeNode* right = pq.top();
+            pq.pop();
+
+            TreeNode* newNode =
+                new TreeNode('\0', right->frequency + left->frequency);
+            newNode->left = left;
+            newNode->right = right;
+            pq.push(newNode);
+        }
+
+        return pq.top();
+    }
+
+   public:
+    void compressFile() {
+        try {
+            std::ifstream file(INPUT_FILE.data(), std::ios::binary);
+            if (!file) {
+                throw std::runtime_error("Failed to open input file: " +
+                                         std::string(INPUT_FILE.data()));
+            }
+
+            std::vector<unsigned char> buffer(
+                std::istreambuf_iterator<char>(file), {});
+            std::map<unsigned char, int> frequencyMap;
+
+            for (unsigned char byte : buffer) {
+                frequencyMap[byte]++;
+            }
+
+            long long int sum = 0;
+            for (const auto& [_, freq] : frequencyMap) {
+                sum += freq;
+            }
+
+            TreeNode* root = createTree(frequencyMap);
+            getBitString(root, buffer, buffer.size(), sum);
+
+            // Cleanup
+            std::function<void(TreeNode*)> deleteTree =
+                [&deleteTree](TreeNode* node) {
+                    if (node) {
+                        deleteTree(node->left);
+                        deleteTree(node->right);
+                        delete node;
+                    }
+                };
+            deleteTree(root);
+
+            Logger::info("File compression completed successfully");
+        } catch (const std::exception& e) {
+            Logger::error("Compression error: %s", e.what());
+            throw;
         }
     }
-    sz = outputBuffer.size();
-    return outputBuffer.data();
-}
+};
 
-void writeFileFromBuffer(const char* path, unsigned char *buffer, int sz, int flag)
-{
-    FILE *fp;
-    if(flag==0)
-    fp = fopen(path, "wb");
-    else
-    fp = fopen(path, "ab");
-    fwrite(buffer, 1, sz, fp);
-    fclose(fp);
-}
+// Base class for network operations
+class NetworkBase {
+   protected:
+    int sockfd{-1};
+    struct sockaddr_in addr;
+    std::string ip;
+    int port;
 
-void writeHeader(const char* path, int paddedBits)
-{
-    int size = code.size();
-    writeFileFromBuffer(path, (unsigned char*)&paddedBits, sizeof(int), 0);
-    writeFileFromBuffer(path, (unsigned char*)&size, sizeof(int), 1);
-    char nullBit = '\0';
-    for(auto& it:code){
-        writeFileFromBuffer(path, (unsigned char*)&it.first, 1, 1);
-        int len = it.second.size();
-        writeFileFromBuffer(path, (unsigned char*)&len, sizeof(int), 1);
-        writeFileFromBuffer(path, (unsigned char*)it.second.c_str(), it.second.size(), 1);
+    NetworkBase(std::string_view ip, int port) : ip(ip), port(port) {
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr(ip.data());
     }
-}
 
-void write_code_to_file()
-{
-    string a;
-    for(auto& it:code)
-    a+=string(1,it.first)+":"+it.second+"\n";
-    ofstream out1(for_decompressed);
-    ofstream out(code_file);
-    out << write_to_file;
-    out1 << a;
-    out.close();
-    out1.close();
-}
-
-void compress(string outputString,int paddedBits)
-{
-    int size = outputString.size();
-    vector<unsigned char> outputBufferV;
-    //for(auto& it:code)
-    //cout<<it.first<<" "<<it.second<<endl;
-    //cout<<outputString;
-    getBufferFromString(outputString, outputBufferV, size);
-    unsigned char* outputBuffer = outputBufferV.data();
-    //cout<<outputBuffer;
-    const char* temp = &compressed[0];
-    writeHeader(temp, paddedBits);
-    writeFileFromBuffer(temp, outputBuffer, size, 1);
-}
-
-void get_bit_string(TreeNode* root,unsigned char* buffer,int size,long long int &sum)
-{
-    string ini;
-    TreeTraversal(root,ini,sum);
-    write_code_to_file();
-    string out_string="";
-    int paddedBits = 0;
-    for(int i=0; i<size; i++)
-    out_string+=code[buffer[i]];
-    if(out_string.size()%8!=0){
-        int deficit = 8*((out_string.size()/8)+1)-out_string.size();
-        paddedBits = deficit;
-        for(int i=0; i<deficit; i++)
-        out_string+="0";
+    virtual ~NetworkBase() {
+        if (sockfd >= 0) {
+            close(sockfd);
+        }
     }
-    free(buffer);
-    compress(out_string,paddedBits);
-}
 
-TreeNode* create_tree(map<unsigned char,int> hashtable)
-{
-    priority_queue<TreeNode*,vector<TreeNode*>,comp> p_que;
-    for(auto& it:hashtable){
-        TreeNode* newNode = new TreeNode(it.first,it.second);
-        //cout<<newNode->key<<" "<<newNode->frequency<<endl;
-        p_que.push(newNode);
+    void setSocketOptions() {
+        int optval = 1;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(int)) <
+            0) {
+            throw std::runtime_error("Failed to set socket options");
+        }
     }
-    //cout<<p_que.top()->key<<" "<<p_que.top()->frequency<<endl;
-    while(p_que.size() > 1 ){
-        TreeNode* left = p_que.top();
-        p_que.pop();
-        TreeNode* right = p_que.top();
-        p_que.pop();
-        TreeNode* newNode = new TreeNode('\0',right->frequency + left->frequency);
-        newNode->left = left;
-        newNode->right = right;
-        p_que.push(newNode);
-    }
-    return p_que.top();
-}
+};
 
-void Huffman()
-{
-    map<unsigned char,int> hashtable;
-    int size = 0;
-    const char* temp = &input[0];
-    unsigned char *buffer = readFileIntoBuffer(temp,size);
-    for (int i = 0; i < size; i++){
-        hashtable[buffer[i]]++;
-    }
-    long long int sum = 0;;
-    for(auto& it:hashtable)
-    sum+=it.second;
-    TreeNode* root = create_tree(hashtable);
-    get_bit_string(root,buffer,size,sum);
-}
+// File sender class
+class FileSender {
+   private:
+    static constexpr size_t CHUNK_SIZE = BUFFER_SIZE;
 
-int main()
-{
-    Huffman();
-    connect();
-    double origin = get_file_size(input);
-    double compressed_len = get_file_size(compressed);
-    cout<<"Original File Length: "<<origin<<" bytes,Compressed File Length: "<<compressed_len<<" bytes"<<endl;
-    cout<<"Using Huffman coding"<<endl;
-    pass_file(compressed);
-    connect();
-    pass_file(code_file);
-    connect();
-    pass_file(for_decompressed);
+    void sendFileChunk(int socket, const std::vector<char>& chunk) {
+        ssize_t totalSent = 0;
+        while (totalSent < static_cast<ssize_t>(chunk.size())) {
+            ssize_t sent = send(socket, chunk.data() + totalSent,
+                                chunk.size() - totalSent, 0);
+            if (sent < 0) {
+                throw std::runtime_error("Failed to send data");
+            }
+            totalSent += sent;
+        }
+    }
+
+   public:
+    void sendFile(int socket, const std::string& filePath) {
+        try {
+            std::ifstream file(filePath, std::ios::binary);
+            if (!file) {
+                throw std::runtime_error("Failed to open file: " + filePath);
+            }
+
+            std::vector<char> buffer(CHUNK_SIZE);
+            size_t totalBytes = 0;
+
+            while (file) {
+                file.read(buffer.data(), buffer.size());
+                std::streamsize bytesRead = file.gcount();
+                if (bytesRead > 0) {
+                    buffer.resize(bytesRead);
+                    sendFileChunk(socket, buffer);
+                    totalBytes += bytesRead;
+                }
+            }
+
+            Logger::info("Sent %zu bytes from file: %s", totalBytes,
+                         filePath.c_str());
+        } catch (const std::exception& e) {
+            Logger::error("Error sending file: %s", e.what());
+            throw;
+        }
+    }
+};
+
+// Client class
+class Client : public NetworkBase {
+   private:
+    std::unique_ptr<FileSender> fileSender;
+    std::unique_ptr<HuffmanCompressor> compressor;
+    std::vector<std::string> filesToSend;
+
+    void connect() {
+        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            throw std::runtime_error("Failed to create socket");
+        }
+
+        setSocketOptions();
+
+        if (::connect(sockfd, reinterpret_cast<struct sockaddr*>(&addr),
+                      sizeof(addr)) < 0) {
+            throw std::runtime_error("Failed to connect to server");
+        }
+
+        Logger::info("Connected to server at %s:%d", ip.c_str(), port);
+    }
+
+   public:
+    Client() : NetworkBase(SERVER_IP.data(), SERVER_PORT) {
+        fileSender = std::make_unique<FileSender>();
+        compressor = std::make_unique<HuffmanCompressor>();
+        filesToSend = {COMPRESSED_FILE.data(), CODE_FILE.data(),
+                       FOR_DECOMPRESSED_FILE.data(), COMPRESSED_FILE.data()};
+    }
+
+    void start() {
+        try {
+            // First compress the file
+            compressor->compressFile();
+
+            // Then send the files
+            for (const auto& file : filesToSend) {
+                connect();  // Create new connection for each file
+
+                try {
+                    fileSender->sendFile(sockfd, file);
+                } catch (const std::exception& e) {
+                    Logger::error("Failed to send file %s: %s", file.c_str(),
+                                  e.what());
+                }
+
+                close(sockfd);
+                sockfd = -1;
+            }
+
+            Logger::info("All files sent successfully");
+        } catch (const std::exception& e) {
+            Logger::error("Client error: %s", e.what());
+            throw;
+        }
+    }
+};
+
+int main() {
+    try {
+        Logger::setLogFileName("client.log");
+        Client client;
+        client.start();
+    } catch (const std::exception& e) {
+        Logger::critical("Fatal error: %s", e.what());
+        return 1;
+    }
+    Logger::close();
     return 0;
 }
